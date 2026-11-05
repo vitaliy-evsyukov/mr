@@ -1,0 +1,278 @@
+package parser
+
+import (
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/xuri/excelize/v2"
+)
+
+type IntervalReading struct {
+	StartTime   time.Time
+	EndTime     time.Time
+	Duration    time.Duration
+	Consumption float64 // in kWh
+	PowerKW     float64 // in kW = Consumption / (Duration in hours)
+	RawValue    string
+}
+
+// ParseXLSX reads an EAC meter reading Excel file and extracts interval readings.
+func ParseXLSX(filePath string) ([]IntervalReading, error) {
+	f, err := excelize.OpenFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open excel file %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	sheetList := f.GetSheetList()
+	if len(sheetList) == 0 {
+		return nil, fmt.Errorf("excel file has no sheets")
+	}
+
+	// 1. Select the most relevant sheet (prefer sheets with "interval" or "load" in their name)
+	targetSheet := ""
+	for _, sheet := range sheetList {
+		lower := strings.ToLower(sheet)
+		if strings.Contains(lower, "interval") || strings.Contains(lower, "load") {
+			targetSheet = sheet
+			break
+		}
+	}
+
+	// If no interval sheet found by name, test each sheet to find one with interval data
+	if targetSheet == "" {
+		bestRows := 0
+		for _, sheet := range sheetList {
+			rows, err := f.GetRows(sheet)
+			if err == nil && len(rows) > bestRows {
+				bestRows = len(rows)
+				targetSheet = sheet
+			}
+		}
+	}
+
+	if targetSheet == "" {
+		targetSheet = sheetList[0]
+	}
+
+	rows, err := f.GetRows(targetSheet)
+	if err != nil {
+		return nil, fmt.Errorf("read rows from sheet %s: %w", targetSheet, err)
+	}
+
+	if len(rows) < 2 {
+		return nil, fmt.Errorf("sheet %s has insufficient rows (found %d)", targetSheet, len(rows))
+	}
+
+	// 2. Identify the Date Column
+	// Count how many rows in each column parse as a valid timestamp
+	maxCols := 0
+	for _, row := range rows {
+		if len(row) > maxCols {
+			maxCols = len(row)
+		}
+	}
+
+	dateScores := make([]int, maxCols)
+	for _, row := range rows {
+		for cIdx, cell := range row {
+			if t, err := parseDateTime(cell); err == nil && !t.IsZero() {
+				dateScores[cIdx]++
+			}
+		}
+	}
+
+	dateCol := -1
+	maxDateScore := 0
+	for cIdx, score := range dateScores {
+		if score > maxDateScore {
+			maxDateScore = score
+			dateCol = cIdx
+		}
+	}
+
+	if dateCol == -1 || maxDateScore < 2 {
+		return nil, fmt.Errorf("could not find timestamp column in sheet %s", targetSheet)
+	}
+
+	// 3. Identify the Consumption Value Column
+	// First, check headers in the top rows for specific keywords like "consumed"
+	valCol := -1
+	for rIdx := 0; rIdx < min(len(rows), 25); rIdx++ {
+		row := rows[rIdx]
+		for cIdx, cell := range row {
+			if cIdx == dateCol {
+				continue
+			}
+			lower := strings.ToLower(strings.TrimSpace(cell))
+			if strings.Contains(lower, "consumed") || strings.Contains(lower, "active energy consumed") {
+				valCol = cIdx
+				break
+			}
+		}
+		if valCol != -1 {
+			break
+		}
+	}
+
+	// If not found by "consumed", find candidate column that has the most numeric values on rows where date is valid
+	if valCol == -1 {
+		numScores := make([]int, maxCols)
+		for _, row := range rows {
+			if len(row) <= dateCol {
+				continue
+			}
+			if t, err := parseDateTime(row[dateCol]); err != nil || t.IsZero() {
+				continue
+			}
+			for cIdx, cell := range row {
+				if cIdx == dateCol {
+					continue
+				}
+				if _, err := parseNumber(cell); err == nil {
+					numScores[cIdx]++
+				}
+			}
+		}
+
+		maxNumScore := 0
+		for cIdx, score := range numScores {
+			if score > maxNumScore {
+				// Don't choose meter serial number column if another column has more/equal rows
+				maxNumScore = score
+				valCol = cIdx
+			}
+		}
+	}
+
+	if valCol == -1 {
+		return nil, fmt.Errorf("could not find consumption value column in sheet %s", targetSheet)
+	}
+
+	// 4. Extract readings
+	var rawReadings []IntervalReading
+
+	for _, row := range rows {
+		if len(row) <= dateCol || len(row) <= valCol {
+			continue
+		}
+
+		dtStr := row[dateCol]
+		valStr := row[valCol]
+
+		timestamp, errDate := parseDateTime(dtStr)
+		if errDate != nil || timestamp.IsZero() {
+			continue
+		}
+
+		consumption, errVal := parseNumber(valStr)
+		if errVal != nil {
+			continue
+		}
+
+		rawReadings = append(rawReadings, IntervalReading{
+			StartTime:   timestamp,
+			Consumption: math.Round(consumption*1000) / 1000,
+			RawValue:    valStr,
+		})
+	}
+
+	if len(rawReadings) == 0 {
+		return nil, fmt.Errorf("no valid interval reading rows found in sheet %s of %s", targetSheet, filePath)
+	}
+
+	// 5. Sort chronologically (oldest to newest)
+	sort.Slice(rawReadings, func(i, j int) bool {
+		return rawReadings[i].StartTime.Before(rawReadings[j].StartTime)
+	})
+
+	// 6. Detect interval duration (e.g. 15 min, 30 min, 60 min)
+	duration := 30 * time.Minute // default for Cyprus EAC
+	if len(rawReadings) > 1 {
+		diff := rawReadings[1].StartTime.Sub(rawReadings[0].StartTime)
+		if diff > 0 && diff <= 2*time.Hour {
+			duration = diff
+		}
+	}
+
+	durHours := duration.Hours()
+	if durHours <= 0 {
+		durHours = 0.5
+	}
+
+	for i := range rawReadings {
+		rawReadings[i].Duration = duration
+		rawReadings[i].EndTime = rawReadings[i].StartTime.Add(duration)
+		rawReadings[i].PowerKW = math.Round((rawReadings[i].Consumption/durHours)*1000) / 1000
+	}
+
+	return rawReadings, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func parseNumber(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty string")
+	}
+	if strings.Count(s, ",") == 1 && !strings.Contains(s, ".") {
+		s = strings.ReplaceAll(s, ",", ".")
+	} else if strings.Count(s, ",") > 1 && strings.Contains(s, ".") {
+		s = strings.ReplaceAll(s, ",", "")
+	}
+	return strconv.ParseFloat(s, 64)
+}
+
+func parseDateTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty date string")
+	}
+
+	layouts := []string{
+		"02.01.2006 15:04:05",
+		"02.01.2006 15:04",
+		"02/01/2006 15:04:05",
+		"02/01/2006 15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05",
+		"02-01-2006 15:04:05",
+		"02-01-2006 15:04",
+		"02.01.2006",
+		"02/01/2006",
+		"2006-01-02",
+	}
+
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+
+	// Try excel float date
+	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 30000 && f < 70000 {
+		return excelTimeToTime(f), nil
+	}
+
+	return time.Time{}, fmt.Errorf("unrecognized date/time format: %s", s)
+}
+
+func excelTimeToTime(excelDate float64) time.Time {
+	excelEpoch := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	days := int64(excelDate)
+	fraction := excelDate - float64(days)
+	nanoseconds := int64(fraction * 86400 * 1e9)
+	return excelEpoch.AddDate(0, 0, int(days)).Add(time.Duration(nanoseconds))
+}

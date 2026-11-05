@@ -1,0 +1,6 @@
+.git
+.env
+data/
+*.log
+meters-reader
+.DS_Store

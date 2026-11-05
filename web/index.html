@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EAC Meter Reader — Мониторинг потребления</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #090d16;
+            --card-bg: #131b2e;
+            --card-border: #1e293b;
+            --input-bg: #0f172a;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #38bdf8;
+            --primary-hover: #0284c7;
+            --accent-warm: #f59e0b;
+            --accent-green: #10b981;
+            --danger: #ef4444;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 24px 16px;
+            line-height: 1.5;
+        }
+
+        .container { max-width: 1100px; margin: 0 auto; }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        h1 { font-size: 1.5rem; display: flex; align-items: center; gap: 8px; color: var(--primary); }
+        .subtitle { font-size: 0.85rem; color: var(--text-muted); }
+
+        /* Auth Card */
+        .auth-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .auth-title { font-size: 1.05rem; margin-bottom: 14px; font-weight: 600; }
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            align-items: end;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        label { font-size: 0.85rem; color: var(--text-muted); }
+        input, select {
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 10px 12px;
+            color: var(--text);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input:focus, select:focus { border-color: var(--primary); }
+
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 14px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+        .checkbox-row input { cursor: pointer; }
+
+        .btn-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+
+        button.btn-primary {
+            background: var(--primary);
+            color: #04101e;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 20px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        button.btn-primary:hover { background: var(--primary-hover); color: #fff; }
+        button.btn-primary:active { transform: scale(0.98); }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        button.btn-ghost {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        button.btn-ghost:hover { color: var(--danger); border-color: var(--danger); }
+
+        /* Status Alert */
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .alert-error { background: rgba(239, 68, 68, 0.15); border: 1px solid var(--danger); color: #fca5a5; }
+        .alert-info { background: rgba(56, 189, 248, 0.12); border: 1px solid var(--primary); color: #bae6fd; }
+
+        /* Dashboard Metrics */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .metric-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 18px;
+        }
+        .metric-label { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 6px; }
+        .metric-value { font-size: 1.7rem; font-weight: bold; color: var(--text); }
+        .metric-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+
+        /* Charts */
+        .chart-box {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+        .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        .chart-title { font-size: 1.05rem; font-weight: 600; color: var(--text); }
+
+        .two-cols {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        @media (max-width: 768px) { .two-cols { grid-template-columns: 1fr; } }
+
+        /* Table */
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--card-border); font-size: 0.88rem; }
+        th { color: var(--text-muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+        tr:hover { background: rgba(255, 255, 255, 0.02); }
+
+        .badge-cache {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(0,0,0,0.3);
+            border-radius: 50%;
+            border-top-color: #04101e;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>⚡ EAC Smart Meter Reader</h1>
+                <p class="subtitle">Мониторинг интервального энергопотребления (DSO Cyprus)</p>
+            </div>
+            <div id="cacheBadgeContainer"></div>
+        </header>
+
+        <!-- Auth & Query Form -->
+        <div class="auth-card">
+            <div class="auth-title">🔐 Авторизация на портале EAC</div>
+            <form id="fetchForm">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="email">EAC Email</label>
+                        <input type="email" id="email" required placeholder="name@example.com" autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Пароль</label>
+                        <input type="password" id="password" required placeholder="Ваш пароль EAC" autocomplete="current-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="daysBack">Период выгрузки</label>
+                        <select id="daysBack">
+                            <option value="3">Последние 3 дня</option>
+                            <option value="7" selected>Последние 7 дней</option>
+                            <option value="14">Последние 14 дней</option>
+                            <option value="30">Последние 30 дней</option>
+                        </select>
+                    </div>
+                </div>
+
+                <label class="checkbox-row">
+                    <input type="checkbox" id="rememberMe" checked>
+                    <span>Запомнить учетные данные в этом браузере (LocalStorage)</span>
+                </label>
+
+                <div class="btn-row">
+                    <button type="submit" id="submitBtn" class="btn-primary">
+                        <span id="btnSpinner" class="spinner" style="display:none;"></span>
+                        <span id="btnText">Загрузить данные</span>
+                    </button>
+                    <button type="button" id="clearBtn" class="btn-ghost" style="display:none;" onclick="clearSavedCreds()">
+                        Забыть мои данные
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Alert Notification -->
+        <div id="statusAlert" class="alert"></div>
+
+        <!-- Dashboard Content (hidden initially until loaded) -->
+        <div id="dashboard" style="display:none;">
+            <!-- Summary Metric Cards -->
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">Суммарный расход</div>
+                    <div class="metric-value"><span id="mTotal">0</span> <span style="font-size:1rem; color:var(--text-muted);">кВт⋅ч</span></div>
+                    <div class="metric-sub" id="mIntervals">0 интервалов</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Пиковый интервал</div>
+                    <div class="metric-value" style="color:var(--accent-warm);"><span id="mPeakKWh">0</span> <span style="font-size:1rem; color:var(--text-muted);">кВт⋅ч</span></div>
+                    <div class="metric-sub" id="mPeakPower">~0.00 кВт мощности</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Средний расход</div>
+                    <div class="metric-value"><span id="mDailyAvg">0</span> <span style="font-size:1rem; color:var(--text-muted);">кВт⋅ч/день</span></div>
+                    <div class="metric-sub" id="mIntervalAvg">0 кВт⋅ч/интервал</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Базовая нагрузка (Min)</div>
+                    <div class="metric-value"><span id="mBaseLoad">0</span> <span style="font-size:1rem; color:var(--text-muted);">кВт⋅ч</span></div>
+                    <div class="metric-sub" id="mBasePower">~0.00 кВт в покое</div>
+                </div>
+            </div>
+
+            <!-- Main Timeline Chart -->
+            <div class="chart-box">
+                <div class="chart-header">
+                    <div class="chart-title">📈 График потребления по 30-минутным интервалам</div>
+                    <div style="font-size:0.8rem; color:var(--text-muted);" id="timelineRange"></div>
+                </div>
+                <div style="position:relative; height:320px;">
+                    <canvas id="timelineChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Two Columns: Hourly Profile & Daily Totals -->
+            <div class="two-cols">
+                <div class="chart-box">
+                    <div class="chart-title">🕒 Среднее потребление по часам (00:00 - 23:00)</div>
+                    <div style="position:relative; height:240px; margin-top:12px;">
+                        <canvas id="hourlyChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <div class="chart-title">📅 Суточный расход энергии (кВт⋅ч)</div>
+                    <div style="position:relative; height:240px; margin-top:12px;">
+                        <canvas id="dailyChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Top Peak Intervals Table -->
+            <div class="chart-box">
+                <div class="chart-title">🔥 Топ интервалов максимального потребления</div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Место</th>
+                            <th>Интервал времени</th>
+                            <th>Энергия (кВт⋅ч)</th>
+                            <th>Пиковая мощность (кВт)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="topTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const STORAGE_KEY = 'eac_meters_creds';
+        let timelineChartInst = null;
+        let hourlyChartInst = null;
+        let dailyChartInst = null;
+
+        // On page load: restore credentials from LocalStorage
+        window.addEventListener('DOMContentLoaded', () => {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) {
+                try {
+                    const data = JSON.parse(saved);
+                    if (data.email) document.getElementById('email').value = data.email;
+                    if (data.password) document.getElementById('password').value = data.password;
+                    if (data.daysBack) document.getElementById('daysBack').value = data.daysBack;
+                    document.getElementById('rememberMe').checked = true;
+                    document.getElementById('clearBtn').style.display = 'inline-block';
+                    // Automatically trigger load on open if credentials exist!
+                    fetchReport();
+                } catch(e) {
+                    localStorage.removeItem(STORAGE_KEY);
+                }
+            }
+        });
+
+        function clearSavedCreds() {
+            localStorage.removeItem(STORAGE_KEY);
+            document.getElementById('email').value = '';
+            document.getElementById('password').value = '';
+            document.getElementById('clearBtn').style.display = 'none';
+            showAlert('Сохраненные данные удалены из браузера', 'info');
+        }
+
+        document.getElementById('fetchForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            fetchReport();
+        });
+
+        async function fetchReport() {
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const daysBack = parseInt(document.getElementById('daysBack').value, 10);
+            const rememberMe = document.getElementById('rememberMe').checked;
+
+            if (!email || !password) {
+                showAlert('Пожалуйста, введите Email и пароль', 'error');
+                return;
+            }
+
+            // Save or clear LocalStorage
+            if (rememberMe) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({ email, password, daysBack }));
+                document.getElementById('clearBtn').style.display = 'inline-block';
+            } else {
+                localStorage.removeItem(STORAGE_KEY);
+                document.getElementById('clearBtn').style.display = 'none';
+            }
+
+            // UI Loading state
+            setLoading(true);
+            showAlert('Подключение к порталу EAC и получение данных...', 'info');
+
+            try {
+                const resp = await fetch('/api/fetch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password, daysBack })
+                });
+
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    throw new Error(data.error || 'Ошибка загрузки данных');
+                }
+
+                hideAlert();
+                renderDashboard(data);
+            } catch (err) {
+                showAlert('Ошибка: ' + err.message, 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function setLoading(isLoading) {
+            const btn = document.getElementById('submitBtn');
+            const spinner = document.getElementById('btnSpinner');
+            const text = document.getElementById('btnText');
+            btn.disabled = isLoading;
+            spinner.style.display = isLoading ? 'inline-block' : 'none';
+            text.innerText = isLoading ? 'Загрузка...' : 'Загрузить данные';
+        }
+
+        function showAlert(msg, type) {
+            const alert = document.getElementById('statusAlert');
+            alert.className = 'alert ' + (type === 'error' ? 'alert-error' : 'alert-info');
+            alert.innerText = msg;
+            alert.style.display = 'block';
+        }
+
+        function hideAlert() {
+            document.getElementById('statusAlert').style.display = 'none';
+        }
+
+        function renderDashboard(data) {
+            const rep = data.report;
+            document.getElementById('dashboard').style.display = 'block';
+
+            // Cache badge
+            const badgeBox = document.getElementById('cacheBadgeContainer');
+            if (data.fromCache) {
+                badgeBox.innerHTML = `<span class="badge-cache">💾 Из кеша памяти (${data.cachedAgo || 'недавно'})</span>`;
+            } else {
+                badgeBox.innerHTML = `<span class="badge-cache" style="background:rgba(56,189,248,0.15); color:var(--primary); border-color:var(--primary);">⚡ Свежие данные с портала</span>`;
+            }
+
+            // Metric cards
+            document.getElementById('mTotal').innerText = rep.TotalConsumption.toFixed(3);
+            document.getElementById('mIntervals').innerText = rep.IntervalCount + ' интервалов по 30 мин';
+
+            document.getElementById('mPeakKWh').innerText = rep.MaxReading.Consumption.toFixed(3);
+            document.getElementById('mPeakPower').innerText = `~${rep.MaxReading.PowerKW.toFixed(2)} кВт мощности (${formatDT(rep.MaxReading.StartTime)})`;
+
+            document.getElementById('mDailyAvg').innerText = rep.DailyAverage.toFixed(2);
+            document.getElementById('mIntervalAvg').innerText = `${rep.AverageInterval.toFixed(3)} кВт⋅ч в среднем`;
+
+            document.getElementById('mBaseLoad').innerText = rep.MinReading.Consumption.toFixed(3);
+            document.getElementById('mBasePower').innerText = `~${rep.MinReading.PowerKW.toFixed(2)} кВт в покое`;
+
+            document.getElementById('timelineRange').innerText = `${formatDT(rep.StartTime)} — ${formatDT(rep.EndTime)}`;
+
+            // Render Timeline Chart
+            const labels = rep.Readings.map(r => formatShort(r.StartTime));
+            const values = rep.Readings.map(r => r.Consumption);
+
+            if (timelineChartInst) timelineChartInst.destroy();
+            timelineChartInst = new Chart(document.getElementById('timelineChart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Расход (кВт⋅ч)',
+                        data: values,
+                        borderColor: '#38bdf8',
+                        backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                        borderWidth: 1.5,
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { ticks: { color: '#94a3b8', maxTicksLimit: 12 }, grid: { color: '#1e293b' } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' }, title: { display: true, text: 'кВт⋅ч', color: '#94a3b8' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // Hourly Chart
+            const hourlyLabels = Array.from({length: 24}, (_, i) => `${String(i).padStart(2, '0')}:00`);
+            const hourlyVals = rep.HourlyAverages;
+            if (hourlyChartInst) hourlyChartInst.destroy();
+            hourlyChartInst = new Chart(document.getElementById('hourlyChart'), {
+                type: 'bar',
+                data: {
+                    labels: hourlyLabels,
+                    datasets: [{
+                        label: 'Средний расход (кВт⋅ч)',
+                        data: hourlyVals,
+                        backgroundColor: '#f59e0b',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { ticks: { color: '#94a3b8', maxTicksLimit: 8 }, grid: { display: false } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // Daily Chart
+            const days = Object.keys(rep.DailyTotals).sort();
+            const dayVals = days.map(d => rep.DailyTotals[d]);
+            if (dailyChartInst) dailyChartInst.destroy();
+            dailyChartInst = new Chart(document.getElementById('dailyChart'), {
+                type: 'bar',
+                data: {
+                    labels: days.map(d => d.slice(5)), // MM-DD
+                    datasets: [{
+                        label: 'Суточный расход (кВт⋅ч)',
+                        data: dayVals,
+                        backgroundColor: '#10b981',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // Top Intervals Table
+            const tbody = document.getElementById('topTableBody');
+            tbody.innerHTML = '';
+            rep.TopIntervals.forEach((r, idx) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td style="font-weight:600; color:var(--primary);">#${idx + 1}</td>
+                    <td>${formatDT(r.StartTime)}</td>
+                    <td><b>${r.Consumption.toFixed(3)}</b> кВт⋅ч</td>
+                    <td style="color:var(--accent-warm);">~${r.PowerKW.toFixed(2)} кВт</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function formatDT(dtStr) {
+            const d = new Date(dtStr);
+            if (isNaN(d)) return dtStr;
+            const pad = n => String(n).padStart(2, '0');
+            return `${pad(d.getDate())}.${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+
+        function formatShort(dtStr) {
+            const d = new Date(dtStr);
+            if (isNaN(d)) return dtStr;
+            const pad = n => String(n).padStart(2, '0');
+            return `${pad(d.getDate())}.${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+.env
+data/*.xlsx
+data/*.html
+!data/sample_readings_demo.xlsx
+meters-reader
+*.log
+.DS_Store
