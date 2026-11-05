@@ -1,6 +1,6 @@
 module meters-reader
 
-go 1.24.0
+go 1.27
 
 require (
 	github.com/guptarohit/asciigraph v0.10.0
