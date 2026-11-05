@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: meters-reader
+    runtime: docker
+    plan: free
+    region: fra
+    healthCheckPath: /health
