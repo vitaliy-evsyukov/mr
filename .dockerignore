@@ -2,5 +2,5 @@
 .env
 data/
 *.log
-meters-reader
+/meters-reader
 .DS_Store
