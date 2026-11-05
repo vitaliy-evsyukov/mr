@@ -1,289 +1,50 @@
-package parser
-
-import (
-	"fmt"
-	"math"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
-
-	"github.com/xuri/excelize/v2"
-)
-
-type IntervalReading struct {
-	StartTime   time.Time
-	EndTime     time.Time
-	Duration    time.Duration
-	Consumption float64 // in kWh
-	PowerKW     float64 // in kW = Consumption / (Duration in hours)
-	RawValue    string
-}
-
-// ParseXLSX reads an EAC meter reading Excel file and extracts interval readings.
-func ParseXLSX(filePath string) ([]IntervalReading, error) {
-	f, err := excelize.OpenFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("open excel file %s: %w", filePath, err)
-	}
-	defer f.Close()
-
-	sheetList := f.GetSheetList()
-	if len(sheetList) == 0 {
-		return nil, fmt.Errorf("excel file has no sheets")
-	}
-
-	// 1. Select the most relevant sheet (prefer sheets with "interval" or "load" in their name)
-	targetSheet := ""
-	for _, sheet := range sheetList {
-		lower := strings.ToLower(sheet)
-		if strings.Contains(lower, "interval") || strings.Contains(lower, "load") {
-			targetSheet = sheet
-			break
-		}
-	}
-
-	// If no interval sheet found by name, test each sheet to find one with interval data
-	if targetSheet == "" {
-		bestRows := 0
-		for _, sheet := range sheetList {
-			rows, err := f.GetRows(sheet)
-			if err == nil && len(rows) > bestRows {
-				bestRows = len(rows)
-				targetSheet = sheet
-			}
-		}
-	}
-
-	if targetSheet == "" {
-		targetSheet = sheetList[0]
-	}
-
-	rows, err := f.GetRows(targetSheet)
-	if err != nil {
-		return nil, fmt.Errorf("read rows from sheet %s: %w", targetSheet, err)
-	}
-
-	if len(rows) < 2 {
-		return nil, fmt.Errorf("sheet %s has insufficient rows (found %d)", targetSheet, len(rows))
-	}
-
-	// 2. Identify the Date Column
-	// Count how many rows in each column parse as a valid timestamp
-	maxCols := 0
-	for _, row := range rows {
-		if len(row) > maxCols {
-			maxCols = len(row)
-		}
-	}
-
-	dateScores := make([]int, maxCols)
-	for _, row := range rows {
-		for cIdx, cell := range row {
-			if t, err := parseDateTime(cell); err == nil && !t.IsZero() {
-				dateScores[cIdx]++
-			}
-		}
-	}
-
-	dateCol := -1
-	maxDateScore := 0
-	for cIdx, score := range dateScores {
-		if score > maxDateScore {
-			maxDateScore = score
-			dateCol = cIdx
-		}
-	}
-
-	if dateCol == -1 || maxDateScore < 2 {
-		return nil, fmt.Errorf("could not find timestamp column in sheet %s", targetSheet)
-	}
-
-	// 3. Identify the Consumption Value Column
-	// First, check headers in the top rows for specific keywords like "consumed"
-	valCol := -1
-	for rIdx := 0; rIdx < min(len(rows), 25); rIdx++ {
-		row := rows[rIdx]
-		for cIdx, cell := range row {
-			if cIdx == dateCol {
-				continue
-			}
-			lower := strings.ToLower(strings.TrimSpace(cell))
-			if strings.Contains(lower, "consumed") || strings.Contains(lower, "active energy consumed") {
-				valCol = cIdx
-				break
-			}
-		}
-		if valCol != -1 {
-			break
-		}
-	}
-
-	// If not found by "consumed", find candidate column that has the most numeric values on rows where date is valid
-	if valCol == -1 {
-		numScores := make([]int, maxCols)
-		for _, row := range rows {
-			if len(row) <= dateCol {
-				continue
-			}
-			if t, err := parseDateTime(row[dateCol]); err != nil || t.IsZero() {
-				continue
-			}
-			for cIdx, cell := range row {
-				if cIdx == dateCol {
-					continue
-				}
-				if _, err := parseNumber(cell); err == nil {
-					numScores[cIdx]++
-				}
-			}
-		}
-
-		maxNumScore := 0
-		for cIdx, score := range numScores {
-			if score > maxNumScore {
-				// Don't choose meter serial number column if another column has more/equal rows
-				maxNumScore = score
-				valCol = cIdx
-			}
-		}
-	}
-
-	if valCol == -1 {
-		return nil, fmt.Errorf("could not find consumption value column in sheet %s", targetSheet)
-	}
-
-	// 4. Extract readings
-	var rawReadings []IntervalReading
-
-	for _, row := range rows {
-		if len(row) <= dateCol || len(row) <= valCol {
-			continue
-		}
-
-		dtStr := row[dateCol]
-		valStr := row[valCol]
-
-		timestamp, errDate := parseDateTime(dtStr)
-		if errDate != nil || timestamp.IsZero() {
-			continue
-		}
-
-		consumption, errVal := parseNumber(valStr)
-		if errVal != nil {
-			continue
-		}
-
-		rawReadings = append(rawReadings, IntervalReading{
-			StartTime:   timestamp,
-			Consumption: math.Round(consumption*1000) / 1000,
-			RawValue:    valStr,
-		})
-	}
-
-	if len(rawReadings) == 0 {
-		return nil, fmt.Errorf("no valid interval reading rows found in sheet %s of %s", targetSheet, filePath)
-	}
-
-	// 5. Sort chronologically (oldest to newest)
-	sort.Slice(rawReadings, func(i, j int) bool {
-		return rawReadings[i].StartTime.Before(rawReadings[j].StartTime)
-	})
-
-	// 6. Detect interval duration (e.g. 15 min, 30 min, 60 min)
-	duration := 30 * time.Minute // default for Cyprus EAC
-	if len(rawReadings) > 1 {
-		diff := rawReadings[1].StartTime.Sub(rawReadings[0].StartTime)
-		if diff > 0 && diff <= 2*time.Hour {
-			duration = diff
-		}
-	}
-
-	durHours := duration.Hours()
-	if durHours <= 0 {
-		durHours = 0.5
-	}
-
-	for i := range rawReadings {
-		rawReadings[i].Duration = duration
-		rawReadings[i].EndTime = rawReadings[i].StartTime.Add(duration)
-		rawReadings[i].PowerKW = math.Round((rawReadings[i].Consumption/durHours)*1000) / 1000
-	}
-
-	return rawReadings, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func parseNumber(s string) (float64, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("empty string")
-	}
-	if strings.Count(s, ",") == 1 && !strings.Contains(s, ".") {
-		s = strings.ReplaceAll(s, ",", ".")
-	} else if strings.Count(s, ",") > 1 && strings.Contains(s, ".") {
-		s = strings.ReplaceAll(s, ",", "")
-	}
-	return strconv.ParseFloat(s, 64)
-}
-
-func parseDateTime(s string) (time.Time, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}, fmt.Errorf("empty date string")
-	}
-
-	loc, err := time.LoadLocation("Europe/Nicosia")
-	if err != nil {
-		loc = time.UTC
-	}
-
-	layouts := []string{
-		"02.01.2006 15:04:05",
-		"02.01.2006 15:04",
-		"02/01/2006 15:04:05",
-		"02/01/2006 15:04",
-		"2006-01-02 15:04:05",
-		"2006-01-02 15:04",
-		"2006-01-02T15:04:05Z07:00",
-		"2006-01-02T15:04:05",
-		"02-01-2006 15:04:05",
-		"02-01-2006 15:04",
-		"02.01.2006",
-		"02/01/2006",
-		"2006-01-02",
-	}
-
-	for _, layout := range layouts {
-		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
-			return t, nil
-		}
-	}
-
-	// Try excel float date
-	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 30000 && f < 70000 {
-		return excelTimeToTime(f), nil
-	}
-
-	return time.Time{}, fmt.Errorf("unrecognized date/time format: %s", s)
-}
-
-func excelTimeToTime(excelDate float64) time.Time {
-	excelEpoch := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-	loc, err := time.LoadLocation("Europe/Nicosia")
-	if err != nil {
-		loc = time.UTC
-	}
-	date := excelEpoch.In(loc)
-	dayCount := int64(excelDate)
-	fraction := excelDate - float64(dayCount)
-	nanoseconds := int64(fraction * 86400 * 1e9)
-	return date.AddDate(0, 0, int(dayCount)).Add(time.Duration(nanoseconds))
-}
-
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EAC Meter Reader — Мониторинг потребления</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root{--bg:#090d16;--card:#131b2e;--border:#1e293b;--text:#f8fafc;--muted:#94a3b8;--primary:#38bdf8;--green:#10b981;--warm:#f59e0b;--danger:#ef4444}
+    *{box-sizing:border-box;margin:0;padding:0}body{font:16px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--text);padding:24px 16px}.container{max-width:1100px;margin:auto}header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border)}h1{font-size:1.5rem;color:var(--primary)}.subtitle,.muted,label{color:var(--muted);font-size:.85rem}.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:20px}.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;align-items:end}.field{display:flex;flex-direction:column;gap:6px}input,select,button{padding:10px 12px;border-radius:8px;border:1px solid var(--border);font:inherit}input,select{background:#0f172a;color:var(--text)}button{background:var(--primary);border:0;font-weight:600;cursor:pointer;color:#04101e}button:disabled{opacity:.6;cursor:wait}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px}.alert{display:none;padding:12px 16px;border-radius:8px;margin-bottom:20px}.alert.info{display:block;background:#0c2434;color:#bae6fd}.alert.error{display:block;background:#35191e;color:#fca5a5}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}.metric{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px}.metric-label{font-size:.8rem;color:var(--muted);text-transform:uppercase}.metric-value{font-size:1.5rem;font-weight:bold;margin-top:5px}.chart{height:320px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--border);font-size:.88rem}th{color:var(--muted)}#dashboard{display:none}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:700px){.two{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main class="container">
+  <header><div><h1>⚡ EAC Smart Meter Reader</h1><p class="subtitle">Мониторинг интервального энергопотребления (DSO Cyprus)</p></div><div id="cacheBadge"></div></header>
+  <section class="card"><h2 style="font-size:1.05rem;margin-bottom:14px">🔐 Авторизация на портале EAC</h2>
+    <form id="fetchForm"><div class="form">
+      <div class="field"><label for="email">EAC Email</label><input id="email" type="email" required placeholder="name@example.com" autocomplete="username"></div>
+      <div class="field"><label for="password">Пароль</label><input id="password" type="password" required placeholder="Ваш пароль EAC" autocomplete="current-password"></div>
+      <div class="field"><label for="daysBack">Период выгрузки</label><select id="daysBack"><option value="3">Последние 3 дня</option><option value="7" selected>Последние 7 дней</option><option value="14">Последние 14 дней</option><option value="30">Последние 30 дней</option></select></div>
+      <button id="submitBtn" type="submit">Загрузить данные</button>
+    </div><div class="row"><label><input type="checkbox" id="rememberMe" checked> Запомнить учетные данные в этом браузере (LocalStorage)</label><button type="button" id="clearBtn" style="display:none;background:transparent;color:var(--muted);border:1px solid var(--border)">Забыть мои данные</button></div></form>
+  </section>
+  <div id="statusAlert" class="alert"></div>
+  <section id="dashboard">
+    <div class="metrics">
+      <div class="metric"><div class="metric-label">Суммарный расход</div><div class="metric-value"><span id="mTotal">0</span> кВт⋅ч</div><div id="mIntervals" class="muted"></div></div>
+      <div class="metric"><div class="metric-label">Пиковый интервал</div><div class="metric-value" id="mPeak">—</div></div>
+      <div class="metric"><div class="metric-label">Средний расход</div><div class="metric-value"><span id="mDailyAvg">0</span> кВт⋅ч/день</div><div id="mIntervalAvg" class="muted"></div></div>
+      <div class="metric"><div class="metric-label">Базовая нагрузка</div><div class="metric-value" id="mBase">—</div></div>
+    </div>
+    <section class="card"><div class="row" style="justify-content:space-between;margin:0 0 12px"><h2 style="font-size:1.05rem">📈 Расход по 30-минутным интервалам</h2><span id="timelineRange" class="muted"></span></div><div class="chart"><canvas id="timelineChart"></canvas></div></section>
+    <div class="two"><section class="card"><h2 style="font-size:1.05rem">🕒 Среднее потребление по часам</h2><div class="chart" style="height:240px"><canvas id="hourlyChart"></canvas></div></section><section class="card"><h2 style="font-size:1.05rem">📅 Суточный расход</h2><div class="chart" style="height:240px"><canvas id="dailyChart"></canvas></div></section></div>
+    <section class="card"><h2 style="font-size:1.05rem">🔥 Топ интервалов максимального потребления</h2><div style="overflow-x:auto"><table><thead><tr><th>Место</th><th>Время</th><th>Энергия</th><th>Пиковая мощность</th></tr></thead><tbody id="topTableBody"></tbody></table></div></section>
+  </section>
+</main>
+<script>
+  const STORAGE_KEY='eac_meters_creds';let timelineChartInst=null,hourlyChartInst=null,dailyChartInst=null;
+  const $=id=>document.getElementById(id);
+  window.addEventListener('DOMContentLoaded',()=>{try{const saved=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null');if(saved){$('email').value=saved.email||'';$('password').value=saved.password||'';$('daysBack').value=saved.daysBack||'7';$('clearBtn').style.display='inline-block';if(saved.email&&saved.password)fetchReport()}}catch(e){localStorage.removeItem(STORAGE_KEY)}});
+  $('clearBtn').addEventListener('click',()=>{localStorage.removeItem(STORAGE_KEY);$('email').value='';$('password').value='';$('clearBtn').style.display='none'});
+  $('fetchForm').addEventListener('submit',e=>{e.preventDefault();fetchReport()});
+  function showAlert(message,type='info'){const a=$('statusAlert');a.textContent=message;a.className='alert '+type}
+  async function fetchReport(){const email=$('email').value.trim(),password=$('password').value,daysBack=parseInt($('daysBack').value,10);if(!email||!password){showAlert('Пожалуйста, введите Email и пароль','error');return}if($('rememberMe').checked){localStorage.setItem(STORAGE_KEY,JSON.stringify({email,password,daysBack}));$('clearBtn').style.display='inline-block'}else localStorage.removeItem(STORAGE_KEY);$('submitBtn').disabled=true;showAlert('Подключение к порталу EAC и получение данных...');try{const resp=await fetch('/api/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,daysBack})});const data=await resp.json();if(!resp.ok)throw new Error(data.error||'Ошибка загрузки данных');showAlert('');renderDashboard(data)}catch(err){showAlert('Ошибка: '+err.message,'error')}finally{$('submitBtn').disabled=false}}
+  function formatDT(value){if(!value)return '—';const d=new Date(value);if(Number.isNaN(d.getTime()))return value;const p=new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Nicosia',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(d);const m=Object.fromEntries(p.filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return `${m.day}.${m.month} ${m.hour}:${m.minute}`}
+  function renderDashboard(data){const r=data.report;$('dashboard').style.display='block';$('cacheBadge').textContent=data.fromCache?`💾 Из кеша памяти (${data.cachedAgo||'недавно'})`:'⚡ Свежие данные с портала';$('mTotal').textContent=Number(r.TotalConsumption).toFixed(3);$('mIntervals').textContent=`${r.IntervalCount} интервалов по 30 мин`;$('mPeak').textContent=`${Number(r.MaxReading.Consumption).toFixed(3)} кВт⋅ч — ${formatDT(r.MaxReading.StartTime)}`;$('mDailyAvg').textContent=Number(r.DailyAverage).toFixed(2);$('mIntervalAvg').textContent=`${Number(r.AverageInterval).toFixed(3)} кВт⋅ч в среднем`;$('mBase').textContent=`${Number(r.MinReading.Consumption).toFixed(3)} кВт⋅ч`;$('timelineRange').textContent=`${formatDT(r.StartTime)} — ${formatDT(r.EndTime)}`;
+    if(timelineChartInst)timelineChartInst.destroy();timelineChartInst=new Chart($('timelineChart'),{type:'line',data:{labels:r.Readings.map(x=>formatDT(x.StartTime)),datasets:[{data:r.Readings.map(x=>x.Consumption),borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.1)',fill:true,pointRadius:1,tension:.1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}});
+    if(hourlyChartInst)hourlyChartInst.destroy();hourlyChartInst=new Chart($('hourlyChart'),{type:'bar',data:{labels:Array.from({length:24},(_,i)=>String(i).padStart(2,'0')+':00'),datasets:[{data:r.HourlyAverages,backgroundColor:'#f59e0b'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}});
+    const days=Object.keys(r.DailyTotals).sort();if(dailyChartInst)dailyChartInst.destroy();dailyChartInst=new Chart($('dailyChart'),{type:'bar',data:{labels:days.map(d=>d.slice(5)),datasets:[{data:days.map(d=>r.DailyTotals[d]),backgroundColor:'#10b981'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}});
+    $('topTableBody').replaceChildren(...r.TopIntervals.map((x,i)=>{const tr=document.createElement('tr');for(const v of [`#${i+1}`,formatDT(x.StartTime),`${Number(x.Consumption).toFixed(3)} кВт⋅ч`,`~${Number(x.PowerKW).toFixed(2)} кВт`]){const td=document.createElement('td');td.textContent=v;tr.appendChild(td)}return tr}));}
+</script></body></html>
