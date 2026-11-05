@@ -102,7 +102,7 @@ func (c *EACClient) Login(email, password string) error {
 		return fmt.Errorf("create login request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) EAC-Meters-Reader/1.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
