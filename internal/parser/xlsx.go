@@ -11,10 +11,12 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// cyprusLocation is the timezone for EAC meter readings (Europe/Nicosia).
+// Falls back to a fixed EET (UTC+2) zone if tzdata is unavailable.
 var cyprusLocation = func() *time.Location {
 	loc, err := time.LoadLocation("Europe/Nicosia")
 	if err != nil {
-		return time.UTC
+		return time.FixedZone("EET", 2*60*60)
 	}
 	return loc
 }()
@@ -241,7 +243,7 @@ func parseDateTime(s string) (time.Time, error) {
 
 func excelTimeToTime(excelDate float64) time.Time {
 	// Excel serial dates are wall-clock calendar values, not UTC instants.
-	// Build the calendar date directly in the EAC timezone instead of converting
+	// Build the calendar date directly in the Cyprus timezone instead of converting
 	// a UTC epoch into Cyprus time (which shifts the displayed clock by +2/+3).
 	dayCount := int64(excelDate)
 	fraction := excelDate - float64(dayCount)
